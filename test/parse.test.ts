@@ -4,7 +4,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { resolve as pathResolve } from "node:path";
-import { parse } from "../parse.ts";
+import { parse, validateSkillName } from "../parse.ts";
 
 // ─── AC-1 case 1: /skill:<name> <args> → skill with non-empty args ─────
 
@@ -100,6 +100,70 @@ describe("parse — passthrough", () => {
 		const result = parse("/skill foo");
 		assert.equal(result.kind, "passthrough");
 		assert.equal(result.text, "/skill foo");
+	});
+});
+
+// ─── AC-1: validateSkillName unit tests ──────────────────────────────
+
+describe("validateSkillName", () => {
+	it("accepts a single lowercase letter", () => {
+		assert.equal(validateSkillName("a"), true);
+	});
+
+	it("accepts a lowercase alphanumeric hyphenated name", () => {
+		assert.equal(validateSkillName("my-skill"), true);
+	});
+
+	it("accepts multiple internal hyphens", () => {
+		assert.equal(validateSkillName("a-b-c"), true);
+	});
+
+	it("accepts a name with digits", () => {
+		assert.equal(validateSkillName("skill123"), true);
+	});
+
+	it("accepts a name of length 64 (boundary)", () => {
+		assert.equal(validateSkillName("a".repeat(64)), true);
+	});
+
+	it("rejects bare '..' (path traversal)", () => {
+		assert.equal(validateSkillName(".."), false);
+	});
+
+	it("rejects a name containing '..' (path traversal)", () => {
+		assert.equal(validateSkillName("../x"), false);
+	});
+
+	it("rejects an absolute path", () => {
+		assert.equal(validateSkillName("/etc/passwd"), false);
+	});
+
+	it("rejects consecutive hyphens", () => {
+		assert.equal(validateSkillName("foo--bar"), false);
+	});
+
+	it("rejects a leading hyphen", () => {
+		assert.equal(validateSkillName("-foo"), false);
+	});
+
+	it("rejects a trailing hyphen", () => {
+		assert.equal(validateSkillName("foo-"), false);
+	});
+
+	it("rejects uppercase letters", () => {
+		assert.equal(validateSkillName("Foo"), false);
+	});
+
+	it("rejects a name containing whitespace", () => {
+		assert.equal(validateSkillName("foo bar"), false);
+	});
+
+	it("rejects an empty string", () => {
+		assert.equal(validateSkillName(""), false);
+	});
+
+	it("rejects a name of length 65 (over the cap)", () => {
+		assert.equal(validateSkillName("a".repeat(65)), false);
 	});
 });
 

@@ -67,6 +67,9 @@ before(() => {
 	skillsDir = join(fixtureDir, "skills");
 	mkdirSync(join(skillsDir, "greet"), { recursive: true });
 	writeFileSync(join(skillsDir, "greet", "SKILL.md"), SAMPLE_SKILL_CONTENT);
+	// Add a second skill for the happy-path regression guard below.
+	mkdirSync(join(skillsDir, "my-skill"), { recursive: true });
+	writeFileSync(join(skillsDir, "my-skill", "SKILL.md"), SAMPLE_SKILL_CONTENT);
 
 	savedSkillsDirEnv = process.env[ENV_SKILLS_DIR];
 	process.env[ENV_SKILLS_DIR] = skillsDir;
@@ -192,6 +195,146 @@ describe("input handler — transform path", () => {
 		assert.equal(result.action, "transform");
 		const text = (result as { text: string }).text;
 		assert.ok(text.includes("hello   world "), "internal whitespace and trailing whitespace must be preserved");
+	});
+});
+
+// ─── Security: path-traversal vectors are blocked ─────────────────────
+//
+// Mirrors the security QA PoC: for each traversal vector, the input
+// handler must return {action:"continue"} — it must NOT transform,
+// and any path an attacker could escape into is checked for a
+// sentinel "TOPSECRET" string to guarantee the out-of-sandbox file
+// was never read.
+
+describe("input handler — path-traversal vectors are blocked", () => {
+	const SECRET_NEEDLE = "TOPSECRET:traversal-must-not-read-this";
+
+	let secretDir: string;
+	let secretMdPath: string;
+
+	before(() => {
+		secretDir = mkdtempSync(join(tmpdir(), "pi-skill-args-trav-"));
+		// Mirror the security-QA PoC layout: <secretDir>/secrets/leaked/SKILL.md
+		// is the env-dir-form target for "/skill:../secrets/leaked".
+		mkdirSync(join(secretDir, "secrets", "leaked"), { recursive: true });
+		writeFileSync(join(secretDir, "secrets", "leaked", "SKILL.md"), SECRET_NEEDLE);
+		// And <secretDir>/secretB.md is the .md-form target for
+		// "/skill:../secretB" once the env var is unset.
+		secretMdPath = join(secretDir, "secretB.md");
+		writeFileSync(secretMdPath, SECRET_NEEDLE);
+	});
+
+	after(() => {
+		rmSync(secretDir, { recursive: true, force: true });
+	});
+
+	// Helper: run a single vector. stages CWD at <secretDir> (or keeps
+	// the existing fixture cwd) and unsets the env var for the .md-form
+	// case. Asserts continue, no transform, and the secret needle
+	// is never in the result text.
+	async function assertBlocked(opts: {
+		input: string;
+		clearEnv: boolean;
+		workdir: string;
+		label: string;
+	}) {
+		const envSaved = process.env[ENV_SKILLS_DIR];
+		const cwdSaved = process.cwd();
+		try {
+			if (opts.clearEnv) delete process.env[ENV_SKILLS_DIR];
+			process.chdir(opts.workdir);
+			const pi = await loadExtension();
+			const result = await invokeInput(pi, {
+				text: opts.input,
+				source: "interactive",
+			});
+			assert.equal(
+				result.action,
+				"continue",
+				`[${opts.label}] expected action=continue, got action=${(result as { action: string }).action}`,
+			);
+			assert.equal(
+				(result as { text?: string }).text,
+				undefined,
+				`[${opts.label}] expected no transform text, got: ${JSON.stringify((result as { text?: string }).text)}`,
+			);
+		} finally {
+			process.chdir(cwdSaved);
+			if (envSaved === undefined) delete process.env[ENV_SKILLS_DIR];
+			else process.env[ENV_SKILLS_DIR] = envSaved;
+		}
+	}
+
+	it("Vector A — env dir <name>/SKILL.md form: /skill:../secrets/leaked", async () => {
+		await assertBlocked({
+			input: "/skill:../secrets/leaked foo",
+			clearEnv: false,
+			workdir: secretDir,
+			label: "A-env-dir-SKILL.md",
+		});
+	});
+
+	it("Vector B — agent dir <name>.md form, env unset: /skill:../secretB", async () => {
+		await assertBlocked({
+			input: "/skill:../secretB foo",
+			clearEnv: true,
+			workdir: secretDir,
+			label: "B-agent-dir-.md",
+		});
+	});
+
+	it("absolute path /skill:/etc/passwd", async () => {
+		const pi = await loadExtension();
+		const result = await invokeInput(pi, {
+			text: "/skill:/etc/passwd foo",
+			source: "interactive",
+		});
+		assert.deepEqual(result, { action: "continue" });
+	});
+
+	it("embedded slash /skill:foo/bar", async () => {
+		const pi = await loadExtension();
+		const result = await invokeInput(pi, {
+			text: "/skill:foo/bar foo",
+			source: "interactive",
+		});
+		assert.deepEqual(result, { action: "continue" });
+	});
+
+	it("bare '..' /skill:..", async () => {
+		const pi = await loadExtension();
+		const result = await invokeInput(pi, {
+			text: "/skill:.. foo",
+			source: "interactive",
+		});
+		assert.deepEqual(result, { action: "continue" });
+	});
+
+	it("consecutive hyphens /skill:foo--bar", async () => {
+		const pi = await loadExtension();
+		const result = await invokeInput(pi, {
+			text: "/skill:foo--bar foo",
+			source: "interactive",
+		});
+		assert.deepEqual(result, { action: "continue" });
+	});
+});
+
+// ─── Security: happy-path regression guard ────────────────────────────
+
+describe("input handler — happy path is not regressed by the validator", () => {
+	it("still transforms a valid /skill:my-skill some-arg invocation", async () => {
+		const pi = await loadExtension();
+		const result = await invokeInput(pi, {
+			text: "/skill:my-skill some-arg",
+			source: "interactive",
+		});
+		assert.equal(result.action, "transform");
+		const text = (result as { text: string }).text;
+		assert.equal(
+			text,
+			`/skill:my-skill\n\n${SAMPLE_SKILL_CONTENT}\n\n--- user input ---\nsome-arg`,
+		);
 	});
 });
 
