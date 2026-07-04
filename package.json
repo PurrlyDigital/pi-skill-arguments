@@ -1,0 +1,36 @@
+{
+  "name": "pi-skill-arguments",
+  "version": "0.1.0",
+  "description": "Pi extension that inlines /skill:<name> <args> invocations into the skill's own context block, removing the harness's default follow-up user prompt.",
+  "type": "module",
+  "license": "MIT",
+  "files": [
+    "parse.ts",
+    "resolve.ts",
+    "index.ts",
+    "tsconfig.json",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "tsx --test test/parse.test.ts test/resolve.test.ts test/wiring.test.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "peerDependenciesMeta": {
+    "@earendil-works/pi-coding-agent": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "tsx": "^4.22.5",
+    "typescript": "^5.5.0",
+    "@types/node": "^22.0.0"
+  }
+}
