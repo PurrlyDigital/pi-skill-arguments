@@ -74,13 +74,7 @@ Args are passed verbatim. Whitespace between the skill name and the args is cons
 
 ## Configuration
 
-The extension reads one optional environment variable:
-
-| Variable | Effect |
-|----------|--------|
-| `PI_SKILL_ARGUMENTS_SKILLS_DIR` | Path to an additional skills directory. The extension consults this directory first when looking for a skill's `SKILL.md`, then falls back to the harness's documented skill locations (`~/.pi/agent/skills/`, `~/.pi/agent/skills/<name>.md`, `.pi/skills/`, `.agents/skills/`, and the same with `<name>/SKILL.md`). The path may use `~` for the home directory. |
-
-No other env var changes the parse, resolve, or handler behavior. The argument-parse contract is part of the public surface and is not configurable.
+The extension has no configuration surface. The argument-parse contract is part of the public surface and is not configurable — no env var, config file, or runtime knob changes parse, resolve, or handler behavior. Skill discovery follows the harness's own documented locations.
 
 ## How it works
 
