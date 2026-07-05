@@ -5,7 +5,7 @@
 
 import { describe, it, before, after, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync, mkdirSync, writeFileSync, rmSync, mkdtempSync } from "node:fs";
+import { readFileSync, mkdirSync, writeFileSync, rmSync, mkdtempSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve as pathResolve } from "node:path";
 import skillArgumentsExtension, { MARKER } from "../index.ts";
@@ -324,6 +324,159 @@ describe("input handler — happy path is not regressed by the validator", () =>
 			text,
 			`/skill:my-skill\n\n${SAMPLE_SKILL_CONTENT}\n\n--- user input ---\nsome-arg`,
 		);
+	});
+});
+
+// ─── Security: symlink-escape in readSkillContent is blocked ──────────
+//
+// The lexical containment guard (`isWithin(resolved, base)`) confirms
+// the path *string* stays under the base dir, but `existsSync` and
+// `readFileSync` follow symlinks. A symlink planted inside a base dir
+// pointing at a file outside the base dir would otherwise pass the
+// lexical check and have its target read into the model context. The
+// guard canonicalizes both base and candidate through `realpathSync`
+// and re-checks containment before reading.
+
+describe("input handler — symlink-escape is blocked", () => {
+	const SECRET_NEEDLE = "TOPSECRET:symlink-escape-must-not-read-this";
+
+	let symlinkDir: string;
+	let symlinkBaseDir: string;
+	let symlinkSecretPath: string;
+	let symlinkCreated = false;
+
+	before(() => {
+		symlinkDir = mkdtempSync(join(tmpdir(), "pi-skill-args-sym-"));
+		// Skills base dir is `<symlinkDir>/.pi/skills`; the secret file
+		// lives one level above the base so the symlink's real target
+		// is outside the base (escapes containment).
+		symlinkBaseDir = join(symlinkDir, ".pi", "skills");
+		mkdirSync(symlinkBaseDir, { recursive: true });
+		symlinkSecretPath = join(symlinkDir, "secret.txt");
+		writeFileSync(symlinkSecretPath, SECRET_NEEDLE);
+
+		// Plant a symlink at `<base>/<name>/SKILL.md` (the form the
+		// resolver consults first) pointing at the secret file with an
+		// absolute target. Also plant the `<base>/<name>.md` form, also
+		// absolute, to cover both shapes the resolver checks. Absolute
+		// targets are unambiguous regardless of how deep the link sits
+		// in the base dir tree. Try/catch around each symlink creation
+		// so platforms that require privilege to create symlinks
+		// (Windows without developer mode) skip cleanly.
+		for (const skillName of ["sym-skill", "sym-skill-md"]) {
+			const dir = join(symlinkBaseDir, skillName);
+			mkdirSync(dir, { recursive: true });
+			try {
+				symlinkSync(symlinkSecretPath, join(dir, "SKILL.md"));
+				symlinkCreated = true;
+			} catch {
+				// Skip on platforms that deny unprivileged symlink creation.
+				return;
+			}
+		}
+		try {
+			symlinkSync(symlinkSecretPath, join(symlinkBaseDir, "sym-skill-md.md"));
+			symlinkCreated = true;
+		} catch {
+			// Skip on platforms that deny unprivileged symlink creation.
+		}
+	});
+
+	after(() => {
+		rmSync(symlinkDir, { recursive: true, force: true });
+	});
+
+	// Helper: returns true when `haystack` is a string and contains the
+	// needle. Hoisted into a function so TypeScript's control-flow
+	// narrowing does not constrain its argument after the prior
+	// `assert.equal(text, undefined)` check.
+	function needlePresent(haystack: unknown, needle: string): boolean {
+		return typeof haystack === "string" && haystack.includes(needle);
+	}
+
+	// Helper: stage cwd at <symlinkDir>, run the handler, assert the
+	// escape is blocked. The needle check fails the test if the target
+	// file's content ever appears in the result text.
+	async function assertEscapeBlocked(opts: { input: string; label: string }) {
+		if (!symlinkCreated) {
+			// Symlink creation needs privilege on this platform; the
+			// escape vector is therefore not present and there is nothing
+			// to assert. Skip rather than fail.
+			return;
+		}
+		const cwdSaved = process.cwd();
+		try {
+			process.chdir(symlinkDir);
+			const pi = await loadExtension();
+			const result = await invokeInput(pi, {
+				text: opts.input,
+				source: "interactive",
+			});
+			assert.equal(
+				result.action,
+				"continue",
+				`[${opts.label}] expected action=continue, got action=${(result as { action: string }).action}`,
+			);
+			const text = (result as { text?: string }).text;
+			assert.equal(
+				text,
+				undefined,
+				`[${opts.label}] expected no transform text, got: ${JSON.stringify(text)}`,
+			);
+			assert.equal(
+				needlePresent(text, SECRET_NEEDLE),
+				false,
+				`[${opts.label}] result text must not contain the target file's contents`,
+			);
+		} finally {
+			process.chdir(cwdSaved);
+		}
+	}
+
+	it("blocks a symlink at <base>/<name>/SKILL.md pointing outside the base (absolute target)", async () => {
+		await assertEscapeBlocked({
+			input: "/skill:sym-skill some-arg",
+			label: "symlink-SKILL.md-absolute",
+		});
+	});
+
+	it("blocks a symlink at <base>/<name>.md pointing outside the base (absolute target)", async () => {
+		await assertEscapeBlocked({
+			input: "/skill:sym-skill-md some-arg",
+			label: "symlink-.md-absolute",
+		});
+	});
+
+	it("regular SKILL.md under the same fixture base still inlines (no regression)", async () => {
+		// Plant a real file in the base so the happy path can be exercised
+		// against the same fixture setup. This proves the realpath guard
+		// does not regress regular files.
+		if (!symlinkCreated) return;
+		const realDir = join(symlinkBaseDir, "real-skill");
+		mkdirSync(realDir, { recursive: true });
+		writeFileSync(join(realDir, "SKILL.md"), SAMPLE_SKILL_CONTENT);
+		const cwdSaved = process.cwd();
+		try {
+			process.chdir(symlinkDir);
+			const pi = await loadExtension();
+			const result = await invokeInput(pi, {
+				text: "/skill:real-skill some-arg",
+				source: "interactive",
+			});
+			assert.equal(result.action, "transform");
+			const text = (result as { text: string }).text;
+			assert.ok(
+				text.includes(SAMPLE_SKILL_CONTENT),
+				"regular SKILL.md in the base must still be inlined",
+			);
+			assert.equal(
+				text.includes(SECRET_NEEDLE),
+				false,
+				"regular SKILL.md transform must not contain the secret needle",
+			);
+		} finally {
+			process.chdir(cwdSaved);
+		}
 	});
 });
 
