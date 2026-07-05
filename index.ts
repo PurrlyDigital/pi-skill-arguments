@@ -1,5 +1,5 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve as pathResolve, sep } from "node:path";
 import { parse, validateSkillName } from "./parse.ts";
@@ -32,15 +32,39 @@ function readSkillContent(name: string): string | null {
 	];
 
 	for (const base of canonicalBases) {
+		// Resolve the base itself through the real filesystem once per base
+		// dir. A symlink planted at a base-dir path would otherwise be
+		// followed at `existsSync`/`readFileSync` time and let a candidate
+		// pass the lexical containment check below.
+		let realBase: string;
+		try {
+			realBase = realpathSync(base);
+		} catch {
+			continue;
+		}
+
 		for (const form of forms) {
 			const candidate = form(base);
 			const resolved = pathResolve(candidate);
 			if (!isWithin(resolved, base)) {
 				continue;
 			}
-			if (existsSync(resolved)) {
+			// Canonicalize the candidate through the real filesystem and
+			// re-check containment against the real base. A symlink whose
+			// real target lies outside the base dir fails this check and
+			// is skipped; a dangling symlink throws and is also skipped.
+			let realCandidate: string;
+			try {
+				realCandidate = realpathSync(resolved);
+			} catch {
+				continue;
+			}
+			if (!isWithin(realCandidate, realBase)) {
+				continue;
+			}
+			if (existsSync(realCandidate)) {
 				try {
-					return readFileSync(resolved, "utf-8");
+					return readFileSync(realCandidate, "utf-8");
 				} catch {
 					continue;
 				}
