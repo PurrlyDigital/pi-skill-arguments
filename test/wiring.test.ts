@@ -327,6 +327,92 @@ describe("input handler — happy path is not regressed by the validator", () =>
 	});
 });
 
+// ─── Streaming-state routing ─────────────────────────────────────────
+//
+// The `input` handler must be state-agnostic: it parses and transforms
+// `/skill:<name> <args>` regardless of `streamingBehavior` (idle, steer,
+// followUp). The harness sets `streamingBehavior` on input events that
+// fire while a turn is mid-flight (steer) or while a follow-up is
+// queued (followUp); the extension must still inline args in those
+// states. The handler never reads `streamingBehavior`; these tests
+// prove the transform fires for those event shapes.
+
+describe("input handler — streaming states (steer, followUp)", () => {
+	const streamingShapes: Array<{ streamingBehavior: "steer" | "followUp"; label: string }> = [
+		{ streamingBehavior: "steer", label: "steer" },
+		{ streamingBehavior: "followUp", label: "followUp" },
+	];
+
+	for (const { streamingBehavior, label } of streamingShapes) {
+		it(`transforms /skill:<name> <args> when streamingBehavior is "${label}"`, async () => {
+			const pi = await loadExtension();
+			const result = await invokeInput(pi, {
+				text: "/skill:greet Alice",
+				source: "interactive",
+				streamingBehavior,
+			});
+			assert.equal(result.action, "transform");
+			const text = (result as { text: string }).text;
+			assert.equal(
+				text,
+				`/skill:greet\n\n${SAMPLE_SKILL_CONTENT}\n\n--- user input ---\nAlice`,
+			);
+		});
+
+		it(`preserves multi-word args in the transform when streamingBehavior is "${label}"`, async () => {
+			const pi = await loadExtension();
+			const result = await invokeInput(pi, {
+				text: "/skill:greet  hello   world ",
+				source: "interactive",
+				streamingBehavior,
+			});
+			assert.equal(result.action, "transform");
+			const text = (result as { text: string }).text;
+			assert.ok(text.includes("hello   world "), "internal whitespace and trailing whitespace must be preserved");
+		});
+
+		it(`returns continue for non-skill input when streamingBehavior is "${label}"`, async () => {
+			const pi = await loadExtension();
+			const result = await invokeInput(pi, {
+				text: "just a normal message",
+				source: "interactive",
+				streamingBehavior,
+			});
+			assert.deepEqual(result, { action: "continue" });
+		});
+
+		it(`returns continue for bare /skill:<name> (no args) when streamingBehavior is "${label}"`, async () => {
+			const pi = await loadExtension();
+			const result = await invokeInput(pi, {
+				text: "/skill:greet",
+				source: "interactive",
+				streamingBehavior,
+			});
+			assert.deepEqual(result, { action: "continue" });
+		});
+
+		it(`returns continue for extension-source input when streamingBehavior is "${label}"`, async () => {
+			const pi = await loadExtension();
+			const result = await invokeInput(pi, {
+				text: "/skill:greet Alice",
+				source: "extension",
+				streamingBehavior,
+			});
+			assert.deepEqual(result, { action: "continue" });
+		});
+
+		it(`returns continue for an unknown skill when streamingBehavior is "${label}"`, async () => {
+			const pi = await loadExtension();
+			const result = await invokeInput(pi, {
+				text: "/skill:does-not-exist hello",
+				source: "interactive",
+				streamingBehavior,
+			});
+			assert.deepEqual(result, { action: "continue" });
+		});
+	}
+});
+
 // ─── AC-5: closed env-var surface ─────────────────────────────────────
 
 describe("closed env-var surface", () => {
