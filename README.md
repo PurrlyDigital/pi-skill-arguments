@@ -1,6 +1,6 @@
 # pi-skill-arguments
 
-A [pi](https://github.com/badlogic/pi-monorepo) extension that inlines `/skill:<name> <args>` invocations into the skill's own context block, removing the harness's default follow-up user prompt.
+A [Pi](https://github.com/earendil-works/pi/) extension that allows skills to take "arguments" and puts the arguments inline for a single model prompt and context.
 
 ## What it does
 
@@ -11,19 +11,31 @@ Today, typing `/skill:greet Alice` in pi causes the harness to:
 
 The follow-up prompt periodically confuses models — they treat the args as a separate user turn rather than as input to the skill. This extension rewrites the invocation so the args land **inside** the skill's context block (at the recency band, after a labeled marker) and the harness emits no follow-up user prompt at all.
 
+This also works for multi-line prompts:
+
+```
+/skill:start-a-conversation-with Alice
+
+Hey, quite the weather today.
+```
+
 ## Before / after
 
 **Before** (default harness behavior):
 
 ```
+---PROMPT---
 <skill content for "greet">
 
+---PROMPT---
 User: Alice
+
 ```
 
 **After** (this extension):
 
 ```
+---PROMPT---
 <skill content for "greet">
 
 --- user input ---
@@ -50,6 +62,12 @@ Plain invocation — no change to the surface syntax:
 /skill:greet Alice
 /skill:my-skill some-arg
 /skill:pdf-tools extract chapter-3
+```
+
+Original usage unchanged.
+
+```
+/skill:my-no-argument-skill
 ```
 
 Args are passed verbatim. Whitespace between the skill name and the args is consumed; internal whitespace is preserved.
