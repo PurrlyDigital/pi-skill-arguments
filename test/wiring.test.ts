@@ -8,7 +8,7 @@ import assert from "node:assert/strict";
 import { readFileSync, mkdirSync, writeFileSync, rmSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve as pathResolve } from "node:path";
-import skillArgumentsExtension, { ENV_SKILLS_DIR, MARKER } from "../index.ts";
+import skillArgumentsExtension, { MARKER } from "../index.ts";
 
 // ─── Mock pi ──────────────────────────────────────────────────────────
 
@@ -48,8 +48,6 @@ async function invokeInput(pi: ReturnType<typeof createMockPi>, event: unknown):
 // ─── Test fixtures ────────────────────────────────────────────────────
 
 let fixtureDir: string;
-let skillsDir: string;
-let savedSkillsDirEnv: string | undefined;
 let savedCwd: string;
 
 const SAMPLE_SKILL_CONTENT = `---
@@ -64,34 +62,34 @@ Say hello to the user.
 
 before(() => {
 	fixtureDir = mkdtempSync(join(tmpdir(), "pi-skill-args-"));
-	skillsDir = join(fixtureDir, "skills");
+	// Place fixtures under the cwd-anchored hardcoded fallback location
+	// `.pi/skills/<name>/SKILL.md` (one of the entries in the resolver's
+	// baseDirs chain). The wiring consults cwd-relative locations when
+	// the env-var seam is absent.
+	const skillsDir = join(fixtureDir, ".pi", "skills");
 	mkdirSync(join(skillsDir, "greet"), { recursive: true });
 	writeFileSync(join(skillsDir, "greet", "SKILL.md"), SAMPLE_SKILL_CONTENT);
 	// Add a second skill for the happy-path regression guard below.
 	mkdirSync(join(skillsDir, "my-skill"), { recursive: true });
 	writeFileSync(join(skillsDir, "my-skill", "SKILL.md"), SAMPLE_SKILL_CONTENT);
 
-	savedSkillsDirEnv = process.env[ENV_SKILLS_DIR];
-	process.env[ENV_SKILLS_DIR] = skillsDir;
-
 	savedCwd = process.cwd();
 	process.chdir(fixtureDir);
 });
 
 after(() => {
-	if (savedSkillsDirEnv === undefined) delete process.env[ENV_SKILLS_DIR];
-	else process.env[ENV_SKILLS_DIR] = savedSkillsDirEnv;
 	process.chdir(savedCwd);
 	rmSync(fixtureDir, { recursive: true, force: true });
 });
 
 beforeEach(() => {
-	process.env[ENV_SKILLS_DIR] = skillsDir;
+	// Re-anchor cwd at the fixture for every test in case an earlier
+	// path-traversal test moved it.
+	process.chdir(fixtureDir);
 });
 
 afterEach(() => {
-	if (savedSkillsDirEnv === undefined) delete process.env[ENV_SKILLS_DIR];
-	else process.env[ENV_SKILLS_DIR] = savedSkillsDirEnv;
+	process.chdir(savedCwd);
 });
 
 // ─── Hook registration ────────────────────────────────────────────────
@@ -210,38 +208,33 @@ describe("input handler — path-traversal vectors are blocked", () => {
 	const SECRET_NEEDLE = "TOPSECRET:traversal-must-not-read-this";
 
 	let secretDir: string;
-	let secretMdPath: string;
 
 	before(() => {
 		secretDir = mkdtempSync(join(tmpdir(), "pi-skill-args-trav-"));
 		// Mirror the security-QA PoC layout: <secretDir>/secrets/leaked/SKILL.md
-		// is the env-dir-form target for "/skill:../secrets/leaked".
+		// is the cwd-anchored `<base>/<name>/SKILL.md` form target for
+		// "/skill:../secrets/leaked".
 		mkdirSync(join(secretDir, "secrets", "leaked"), { recursive: true });
 		writeFileSync(join(secretDir, "secrets", "leaked", "SKILL.md"), SECRET_NEEDLE);
-		// And <secretDir>/secretB.md is the .md-form target for
-		// "/skill:../secretB" once the env var is unset.
-		secretMdPath = join(secretDir, "secretB.md");
-		writeFileSync(secretMdPath, SECRET_NEEDLE);
+		// And <secretDir>/secretB.md is the `<base>/<name>.md` form target
+		// for "/skill:../secretB".
+		writeFileSync(join(secretDir, "secretB.md"), SECRET_NEEDLE);
 	});
 
 	after(() => {
 		rmSync(secretDir, { recursive: true, force: true });
 	});
 
-	// Helper: run a single vector. stages CWD at <secretDir> (or keeps
-	// the existing fixture cwd) and unsets the env var for the .md-form
-	// case. Asserts continue, no transform, and the secret needle
-	// is never in the result text.
+	// Helper: run a single vector. stages CWD at <secretDir> and asserts
+	// continue, no transform, and the secret needle is never in the
+	// result text.
 	async function assertBlocked(opts: {
 		input: string;
-		clearEnv: boolean;
 		workdir: string;
 		label: string;
 	}) {
-		const envSaved = process.env[ENV_SKILLS_DIR];
 		const cwdSaved = process.cwd();
 		try {
-			if (opts.clearEnv) delete process.env[ENV_SKILLS_DIR];
 			process.chdir(opts.workdir);
 			const pi = await loadExtension();
 			const result = await invokeInput(pi, {
@@ -260,26 +253,22 @@ describe("input handler — path-traversal vectors are blocked", () => {
 			);
 		} finally {
 			process.chdir(cwdSaved);
-			if (envSaved === undefined) delete process.env[ENV_SKILLS_DIR];
-			else process.env[ENV_SKILLS_DIR] = envSaved;
 		}
 	}
 
-	it("Vector A — env dir <name>/SKILL.md form: /skill:../secrets/leaked", async () => {
+	it("Vector A — cwd <base>/<name>/SKILL.md form: /skill:../secrets/leaked", async () => {
 		await assertBlocked({
 			input: "/skill:../secrets/leaked foo",
-			clearEnv: false,
 			workdir: secretDir,
-			label: "A-env-dir-SKILL.md",
+			label: "A-cwd-SKILL.md",
 		});
 	});
 
-	it("Vector B — agent dir <name>.md form, env unset: /skill:../secretB", async () => {
+	it("Vector B — cwd <base>/<name>.md form: /skill:../secretB", async () => {
 		await assertBlocked({
 			input: "/skill:../secretB foo",
-			clearEnv: true,
 			workdir: secretDir,
-			label: "B-agent-dir-.md",
+			label: "B-cwd-.md",
 		});
 	});
 
@@ -346,33 +335,14 @@ describe("closed env-var surface", () => {
 		"utf-8",
 	);
 
-	it("only references the PI_SKILL_ARGUMENTS_* namespace in process.env", () => {
-		// Find every process.env reference in the file (both dot and bracket
-		// access patterns). For bracket access, resolve the const name back
-		// to its declared value via a small regex over the `const X = "..."`
-		// lines in the file. Every resolved name must be in the
-		// PI_SKILL_ARGUMENTS_ namespace.
-		const constMap = new Map<string, string>();
-		for (const m of indexSource.matchAll(/^const\s+(\w+)\s*=\s*["']([^"']+)["']\s*;?/gm)) {
-			constMap.set(m[1], m[2]);
-		}
-
+	it("index.ts has no process.env references (env-var surface is empty)", () => {
 		const dotRefs = [...(indexSource.matchAll(/process\.env\.([A-Z_][A-Z0-9_]*)/g) ?? [])].map((m) => m[1]);
 		const bracketRefNames = [...(indexSource.matchAll(/process\.env\[\s*([A-Z_][A-Z0-9_]*)\s*\]/g) ?? [])].map((m) => m[1]);
-		const bracketRefValues = bracketRefNames.map((name) => constMap.get(name) ?? name);
 
-		const allRefs = [...dotRefs, ...bracketRefValues];
-		assert.ok(allRefs.length > 0, "expected at least one process.env reference");
-		for (const ref of allRefs) {
-			assert.ok(
-				ref.startsWith("PI_SKILL_ARGUMENTS_"),
-				`process.env reference must use the PI_SKILL_ARGUMENTS_ namespace, found: ${ref}`,
-			);
-		}
-	});
-
-	it("exports the env var name as a constant", () => {
-		assert.equal(typeof ENV_SKILLS_DIR, "string");
-		assert.ok(ENV_SKILLS_DIR.startsWith("PI_SKILL_ARGUMENTS_"));
+		assert.deepEqual(
+			[...dotRefs, ...bracketRefNames],
+			[],
+			"index.ts must not reference process.env; the env-var surface is closed",
+		);
 	});
 });
