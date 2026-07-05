@@ -85,11 +85,12 @@ The extension registers a single `input` event handler that fires before the har
 3. **Pass-through paths** — non-skill input, bare skill invocations, and unknown skill names are returned unchanged. The harness handles them the same way it always has.
 4. **Transform path** — for a `/skill:<name> <args>` invocation whose skill content can be located on disk, the extension reads the skill's `SKILL.md`, appends a `--- user input ---` marker line and the args, and returns the inlined block to the harness. The harness's skill expansion loads the skill by name (the `/skill:<name>` prefix is preserved in the transformed text) and emits no follow-up user prompt because there are no trailing args.
 
+The handler is state-agnostic: it transforms `/skill:<name> <args>` in every input state — idle, steer, and followUp. The harness sets `streamingBehavior` on input events that fire mid-turn or while a follow-up is queued, but the extension's transform path does not branch on it. A `steer` still steers and a `followUp` still follows up; only the args-to-skill-context routing changes. The single `SKILL.md` read runs in every state — the read is cheap and uniform behavior is simpler than a steer-only fast path.
+
 The parse and resolve logic is split into pure modules (`parse.ts` and `resolve.ts`) for testability — no filesystem, no environment, no harness I/O lives in those modules.
 
 ## Limitations
 
-- **Streaming-aware routing is not yet supported.** If you invoke a skill from a non-idle state (mid-stream or as a queued follow-up), the extension passes through unchanged and the harness's default follow-up prompt behavior applies.
 - **The skill content must be discoverable on disk** (in one of the configured skills directories). If the extension cannot locate a `SKILL.md` for the named skill, it passes through and lets the harness surface "skill not found" via its own expansion path.
 - **End-to-end harness testing is not included** in this release. The unit tests cover the parse, resolve, and wiring contracts; an integration test that boots pi and asserts the inlined block in the LLM-bound prompt is planned for a follow-up.
 
